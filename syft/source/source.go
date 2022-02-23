@@ -306,7 +306,7 @@ func getImageExclusionFunction(exclusions []string) func(string) bool {
 	}
 }
 
-func getDirectoryExclusionFunctions(root string, exclusions []string) ([]pathFilterFn, error) {
+func getDirectoryExclusionFunctions(fs afero.Fs, root string, exclusions []string) ([]pathFilterFn, error) {
 	if len(exclusions) == 0 {
 		return nil, nil
 	}
@@ -336,6 +336,15 @@ func getDirectoryExclusionFunctions(root string, exclusions []string) ([]pathFil
 		return nil, fmt.Errorf("invalid exclusion pattern(s): '%s' (must start with one of: './', '*/', or '**/')", strings.Join(errors, "', '"))
 	}
 
+	st, err := fs.Stat(root)
+	if err != nil {
+		return nil, err
+	}
+	rootfsid, err := getDeviceID(st)
+	if err != nil {
+		return nil, err
+	}
+
 	return []pathFilterFn{
 		func(path string, _ os.FileInfo) bool {
 			for _, exclusion := range exclusions {
@@ -348,6 +357,13 @@ func getDirectoryExclusionFunctions(root string, exclusions []string) ([]pathFil
 				}
 			}
 			return false
+		},
+		func(path string, fi os.FileInfo) bool {
+			fsid, err := getDeviceID(fi)
+			if err != nil {
+				return true
+			}
+			return fsid != rootfsid
 		},
 	}, nil
 }
