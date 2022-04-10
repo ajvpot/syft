@@ -3,6 +3,10 @@ package cataloger
 import (
 	"fmt"
 
+	"github.com/wagoodman/go-partybus"
+	"github.com/wagoodman/go-progress"
+	"go.uber.org/multierr"
+
 	"github.com/anchore/syft/internal/bus"
 	"github.com/anchore/syft/internal/log"
 	"github.com/anchore/syft/syft/artifact"
@@ -11,9 +15,6 @@ import (
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/pkg/cataloger/common/cpe"
 	"github.com/anchore/syft/syft/source"
-	"github.com/hashicorp/go-multierror"
-	"github.com/wagoodman/go-partybus"
-	"github.com/wagoodman/go-progress"
 )
 
 // Monitor provides progress-related data for observing the progress of a Catalog() call (published on the event bus).
@@ -48,22 +49,33 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 	filesProcessed, packagesDiscovered := newMonitor()
 
 	// perform analysis, accumulating errors for each failed analysis
-	var errs error
+	packageChan := make(chan pkg.Package)
+	relationshipChan := make(chan artifact.Relationship)
+	errChan := make(chan error)
+
 	for _, c := range catalogers {
-		// find packages from the underlying raw data
-		log.Debugf("cataloging with %q", c.Name())
-		packages, relationships, err := c.Catalog(resolver)
-		if err != nil {
-			errs = multierror.Append(errs, err)
-			continue
-		}
+		//todo semaphore
+		go func(c Cataloger) {
+			// find packages from the underlying raw data
+			log.Debugf("cataloging with %q", c.Name())
+			packages, relationships, err := c.Catalog(resolver)
+			if err != nil {
+				errChan <- err
+				return
+			}
+			for _, lpkg := range packages {
+				packageChan <- lpkg
+			}
+			for _, lrel := range relationships {
+				relationshipChan <- lrel
+			}
+		}(c)
+	}
 
-		catalogedPackages := len(packages)
+	go func() {
+		for p := range packageChan {
+			packagesDiscovered.N += 1
 
-		log.Debugf("discovered %d packages", catalogedPackages)
-		packagesDiscovered.N += int64(catalogedPackages)
-
-		for _, p := range packages {
 			// generate CPEs (note: this is excluded from package ID, so is safe to mutate)
 			p.CPEs = cpe.Generate(p)
 
@@ -81,9 +93,20 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 			// add to catalog
 			catalog.Add(p)
 		}
+	}()
 
-		allRelationships = append(allRelationships, relationships...)
-	}
+	go func() {
+		for r := range relationshipChan {
+			allRelationships = append(allRelationships, r)
+		}
+	}()
+
+	var errs error
+	go func() {
+		for err := range errChan {
+			errs = multierr.Append(errs, err)
+		}
+	}()
 
 	allRelationships = append(allRelationships, pkg.NewRelationships(catalog)...)
 
