@@ -3,6 +3,10 @@ package cataloger
 import (
 	"fmt"
 
+	"github.com/hashicorp/go-multierror"
+	"github.com/wagoodman/go-partybus"
+	"github.com/wagoodman/go-progress"
+
 	"github.com/anchore/syft/internal/bus"
 	"github.com/anchore/syft/internal/log"
 	"github.com/anchore/syft/syft/artifact"
@@ -11,9 +15,6 @@ import (
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/pkg/cataloger/common/cpe"
 	"github.com/anchore/syft/syft/source"
-	"github.com/hashicorp/go-multierror"
-	"github.com/wagoodman/go-partybus"
-	"github.com/wagoodman/go-progress"
 )
 
 // Monitor provides progress-related data for observing the progress of a Catalog() call (published on the event bus).
@@ -50,39 +51,41 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 	// perform analysis, accumulating errors for each failed analysis
 	var errs error
 	for _, c := range catalogers {
-		// find packages from the underlying raw data
-		log.Debugf("cataloging with %q", c.Name())
-		packages, relationships, err := c.Catalog(resolver)
-		if err != nil {
-			errs = multierror.Append(errs, err)
-			continue
-		}
-
-		catalogedPackages := len(packages)
-
-		log.Debugf("discovered %d packages", catalogedPackages)
-		packagesDiscovered.N += int64(catalogedPackages)
-
-		for _, p := range packages {
-			// generate CPEs (note: this is excluded from package ID, so is safe to mutate)
-			p.CPEs = cpe.Generate(p)
-
-			// generate PURL (note: this is excluded from package ID, so is safe to mutate)
-			p.PURL = pkg.URL(p, release)
-
-			// create file-to-package relationships for files owned by the package
-			owningRelationships, err := packageFileOwnershipRelationships(p, resolver)
+		go func(c Cataloger) {
+			// find packages from the underlying raw data
+			log.Debugf("cataloging with %q", c.Name())
+			packages, relationships, err := c.Catalog(resolver)
 			if err != nil {
-				log.Warnf("unable to create any package-file relationships for package name=%q: %w", p.Name, err)
-			} else {
-				allRelationships = append(allRelationships, owningRelationships...)
+				errs = multierror.Append(errs, err)
+				return
 			}
 
-			// add to catalog
-			catalog.Add(p)
-		}
+			catalogedPackages := len(packages)
 
-		allRelationships = append(allRelationships, relationships...)
+			log.Debugf("discovered %d packages", catalogedPackages)
+			packagesDiscovered.N += int64(catalogedPackages)
+
+			for _, p := range packages {
+				// generate CPEs (note: this is excluded from package ID, so is safe to mutate)
+				p.CPEs = cpe.Generate(p)
+
+				// generate PURL (note: this is excluded from package ID, so is safe to mutate)
+				p.PURL = pkg.URL(p, release)
+
+				// create file-to-package relationships for files owned by the package
+				owningRelationships, err := packageFileOwnershipRelationships(p, resolver)
+				if err != nil {
+					log.Warnf("unable to create any package-file relationships for package name=%q: %w", p.Name, err)
+				} else {
+					allRelationships = append(allRelationships, owningRelationships...)
+				}
+
+				// add to catalog
+				catalog.Add(p)
+			}
+
+			allRelationships = append(allRelationships, relationships...)
+		}(c)
 	}
 
 	allRelationships = append(allRelationships, pkg.NewRelationships(catalog)...)
