@@ -2,6 +2,7 @@ package cataloger
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/hashicorp/go-multierror"
 	"github.com/wagoodman/go-partybus"
@@ -50,7 +51,11 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 
 	// perform analysis, accumulating errors for each failed analysis
 	var errs error
+	sem := make(chan struct{}, 4)
+	wg := sync.WaitGroup{}
 	for _, c := range catalogers {
+		sem <- struct{}{}
+		wg.Add(1)
 		go func(c Cataloger) {
 			// find packages from the underlying raw data
 			log.Debugf("cataloging with %q", c.Name())
@@ -85,8 +90,11 @@ func Catalog(resolver source.FileResolver, release *linux.Release, catalogers ..
 			}
 
 			allRelationships = append(allRelationships, relationships...)
+			<-sem
+			wg.Done()
 		}(c)
 	}
+	wg.Wait()
 
 	allRelationships = append(allRelationships, pkg.NewRelationships(catalog)...)
 
